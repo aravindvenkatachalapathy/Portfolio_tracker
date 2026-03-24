@@ -604,6 +604,21 @@ def yahoo_ticker(symbol: str) -> str:
     return f"{symbol}.NS"
 
 
+@st.cache_data(ttl=3600)
+def fetch_gold_price() -> float:
+    """Fetches global gold futures and USD-INR rate to estimate current gold price in India per gram."""
+    try:
+        gold_fut = yf.download("GC=F", period="1d", interval="1m", progress=False)["Close"].iloc[-1]
+        usd_inr  = yf.download("USDINR=X", period="1d", interval="1m", progress=False)["Close"].iloc[-1]
+        if isinstance(gold_fut, (pd.Series, pd.DataFrame)): gold_fut = gold_fut.iloc[0]
+        if isinstance(usd_inr, (pd.Series, pd.DataFrame)): usd_inr = usd_inr.iloc[0]
+        # 1 Troy Ounce = 31.1035 Grams
+        price_per_gram = (gold_fut / 31.1035) * usd_inr
+        # Local market premium approximation (~5-8% for GST/Customs)
+        return price_per_gram * 1.06 
+    except Exception:
+        return 8200.0 # Robust fallback
+
 # ════════════════════════════════════════════════════════════════════════════
 # 8.  RENDERING HELPERS
 # ════════════════════════════════════════════════════════════════════════════
@@ -911,21 +926,28 @@ def render_combined_overview(
     stock_value: float,
     mf_invested: float,
     mf_value: float,
+    gold_value: float = 0.0,
+    re_value: float = 0.0,
+    fd_value: float = 0.0,
 ):
     """Renders a combined portfolio summary with donut + bar charts."""
-    total_invested = stock_invested + mf_invested
-    total_value    = stock_value + mf_value
-    total_pnl      = total_value - total_invested
-    total_pnl_pct  = total_pnl / total_invested * 100 if total_invested > 0 else 0
+    total_invested = stock_invested + mf_invested + gold_value + re_value + fd_value
+    total_value    = stock_value + mf_value + gold_value + re_value + fd_value
+    total_pnl      = (stock_value - stock_invested) + (mf_value - mf_invested)
+    total_pnl_pct  = total_pnl / (stock_invested + mf_invested) * 100 if (stock_invested + mf_invested) > 0 else 0
 
     # ── Top KPI row ───────────────────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
     k1.metric(" Total Invested",   f"₹{total_invested:,.0f}")
-    k2.metric(" Total Value",      f"₹{total_value:,.0f}")
-    k3.metric(" Total P&L",        f"₹{total_pnl:,.0f}", f"{total_pnl_pct:+.2f}%")
-    stock_pct = stock_value / total_value * 100 if total_value > 0 else 0
-    mf_pct    = mf_value    / total_value * 100 if total_value > 0 else 0
-    k4.metric(" Stocks / MF Split", f"{stock_pct:.0f}% / {mf_pct:.0f}%")
+    k2.metric(" Total Value",      f"₹{total_value:,.2f}")
+    k3.metric(" Market P&L (S+MF)",f"₹{total_pnl:,.2f}", f"{total_pnl_pct:+.2f}%")
+    
+    # Ratios
+    s_pct = stock_value / total_value * 100 if total_value > 0 else 0
+    m_pct = mf_value    / total_value * 100 if total_value > 0 else 0
+    a_pct = (gold_value + re_value) / total_value * 100 if total_value > 0 else 0
+    f_pct = fd_value    / total_value * 100 if total_value > 0 else 0
+    k4.metric(" Asset Allocation", f"S:{s_pct:.0f}% / M:{m_pct:.0f}% / O:{a_pct+f_pct:.0f}%")
 
     st.divider()
 
@@ -935,10 +957,10 @@ def render_combined_overview(
     # Donut — allocation by current value
     with col_left:
         fig_donut = go.Figure(go.Pie(
-            labels=["Stocks", "Mutual Funds"],
-            values=[stock_value, mf_value],
+            labels=["Stocks", "Mutual Funds", "Gold", "Real Estate", "Fixed Deposits"],
+            values=[stock_value, mf_value, gold_value, re_value, fd_value],
             hole=0.55,
-            marker=dict(colors=["#2E86C1", "#1a9e6a"]),
+            marker=dict(colors=["#2E86C1", "#1a9e6a", "#f1c40f", "#8e44ad", "#e67e22"]),
             textinfo="label+percent",
         ))
         fig_donut.update_layout(
@@ -963,6 +985,11 @@ def render_combined_overview(
             y=[stock_value, mf_value, total_value],
             marker_color=["#2E86C1", "#1a9e6a", "#f39c12"],
         ))
+        if fd_value > 0:
+            fig_bar.add_trace(go.Bar(
+                name="Fixed Deposits",
+                x=["FD"], y=[fd_value], marker_color="#e67e22"
+            ))
         fig_bar.update_layout(
             barmode="group",
             title="Invested vs Current Value",
@@ -981,11 +1008,11 @@ def render_combined_overview(
     mf_pnl_pct    = mf_pnl / mf_invested * 100 if mf_invested > 0 else 0
 
     summary_data = {
-        "Category":       [" Stocks", " Mutual Funds", " Total Portfolio"],
-        "Invested (₹)":   [f"₹{stock_invested:,.2f}", f"₹{mf_invested:,.2f}", f"₹{total_invested:,.2f}"],
-        "Current (₹)":    [f"₹{stock_value:,.2f}",    f"₹{mf_value:,.2f}",    f"₹{total_value:,.2f}"],
-        "P&L (₹)":        [f"₹{stock_pnl:,.2f}",      f"₹{mf_pnl:,.2f}",      f"₹{total_pnl:,.2f}"],
-        "P&L (%)":        [f"{stock_pnl_pct:+.2f}%",   f"{mf_pnl_pct:+.2f}%",  f"{total_pnl_pct:+.2f}%"],
+        "Category":       [" Stocks", " Mutual Funds", " Gold", " Real Estate", " Fixed Deposits", " Total Portfolio"],
+        "Invested (₹)":   [f"₹{stock_invested:,.2f}", f"₹{mf_invested:,.2f}", f"₹{gold_value:,.2f}", f"₹{re_value:,.2f}", f"₹{fd_value:,.2f}", f"₹{total_invested:,.2f}"],
+        "Current (₹)":    [f"₹{stock_value:,.2f}",    f"₹{mf_value:,.2f}",    f"₹{gold_value:,.2f}", f"₹{re_value:,.2f}", f"₹{fd_value:,.2f}", f"₹{total_value:,.2f}"],
+        "P&L (₹)":        [f"₹{stock_pnl:,.2f}",      f"₹{mf_pnl:,.2f}",      "—",                    "—" ,                 "—",                     f"₹{total_pnl:,.2f}"],
+        "P&L (%)":        [f"{stock_pnl_pct:+.2f}%",   f"{mf_pnl_pct:+.2f}%",  "—",                    "—",                  "—",                     f"{total_pnl_pct:+.2f}%"],
     }
     st.dataframe(pd.DataFrame(summary_data).set_index("Category"), use_container_width=True)
 
@@ -997,7 +1024,30 @@ def render_combined_overview(
 st.title(" Nivetha's Portfolio Tracker")
 st.caption("Long-term investor edition — fundamental-first signal engine")
 
-excel_path = r"C:\Users\Aravind\control\Porfolio\holdings-UB7034.xlsx"
+excel_path = r"holdings-UB7034.xlsx"
+
+# ── Load FD data (from Excel) ──────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def load_fd_data(path: str) -> pd.DataFrame:
+    required_cols = ["Bank/Institution", "Amount (₹)", "Interest Rate (%)", "Maturity Date"]
+    try:
+        # Check if file exists first
+        if not os.path.exists(path): return pd.DataFrame(columns=required_cols)
+        
+        # Check if sheet exists
+        xls = pd.ExcelFile(path)
+        if "Fixed Deposits" in xls.sheet_names:
+            df = pd.read_excel(path, sheet_name="Fixed Deposits")
+            # Ensure columns exist, if not create empty
+            for col in required_cols:
+                if col not in df.columns: df[col] = None
+            return df[required_cols]
+        return pd.DataFrame(columns=required_cols)
+    except Exception:
+        return pd.DataFrame(columns=required_cols)
+
+if "fd_data" not in st.session_state:
+    st.session_state["fd_data"] = load_fd_data(excel_path)
 
 try:
     portfolio = load_portfolio(excel_path)
@@ -1053,10 +1103,12 @@ if not mf_df.empty:
         })
 
 # ── TABS ─────────────────────────────────────────────────────────────────
-tab_overview, tab_stocks, tab_mf, tab_forecast = st.tabs([
+tab_overview, tab_stocks, tab_mf, tab_alt, tab_fd, tab_forecast = st.tabs([
     "My Portfolio",
     "Stock Portfolio",
     "Mutual Funds",
+    "Alt Assets",
+    "Fixed Deposits",
     "Forecast",
 ])
 
@@ -1223,36 +1275,108 @@ Format with clear markdown headers. Be direct and specific. No hype.
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# TAB: ALT ASSETS (Gold & Real Estate)
+# ════════════════════════════════════════════════════════════════════════════
+with tab_alt:
+    st.header(" Real Estate & Gold Holdings")
+    st.caption("Automatically calculates your physical asset value using current market rates.")
+
+    # ── GOLD TRACKER ───────────────────────────────────────────────────────
+    live_price_per_gram = fetch_gold_price()
+    st.markdown(f"""
+    <div style='background:#111; padding:15px; border-radius:10px; border:1px solid #f1c40f; margin-bottom:20px'>
+        <span style='color:#f1c40f; font-weight:bold'>✨ Current Live Gold Price (India approx 24K):</span> 
+        <span style='font-size:20px; font-weight:bold'>₹{live_price_per_gram:,.2f} / gram</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    a_col1, a_col2 = st.columns(2)
+    with a_col1:
+        st.subheader("Gold Settings")
+        gold_grams = st.number_input("Number of Gold Grams (holdings)", 0.0, 10000.0, 0.0, 5.0, key="grams_input")
+        gold_val = gold_grams * live_price_per_gram
+        st.metric("Total Gold Value", f"₹{gold_val:,.2f}")
+        
+        if st.checkbox("Show Gold Price Trend (GC=F)"):
+            try:
+                g_hist = yf.download("GC=F", period="1y")["Close"]
+                fig_g = go.Figure(go.Scatter(x=g_hist.index, y=g_hist, line=dict(color="#f1c40f", width=1.5)))
+                fig_g.update_layout(title="Gold Futures ($/Oz) - 1 Year Trend", height=250, margin=dict(l=10,r=10,t=40,b=10), paper_bgcolor="rgba(0,0,0,0)", font_color="#ccc")
+                st.plotly_chart(fig_g, use_container_width=True)
+            except Exception: pass
+
+    with a_col2:
+        st.subheader("Real Estate Settings")
+        re_val = st.number_input("Real Estate Total Value (₹)", 0.0, 1000_000_000.0, 0.0, 50000.0, key="alt_re")
+        st.caption("Enter current appraised market value.")
+
+    # Persist to session state
+    st.session_state["gold_grams"] = gold_grams
+    st.session_state["gold_value"] = gold_val
+    st.session_state["re_value"]   = re_val
+
+    st.divider()
+    st.success("Alternative Assets updated. Total portfolio summary and forecast projections reflecting these live values.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB: FIXED DEPOSITS
+# ════════════════════════════════════════════════════════════════════════════
+with tab_fd:
+    st.header("🏦 Fixed Deposits & Debt Savings")
+    st.caption("Manage your fixed-income portfolio here. Changes update your total net worth.")
+
+    # Using the pre-loaded session state data
+    st.subheader("Interactive FD Tracker")
+    edited_fd = st.data_editor(
+        st.session_state["fd_data"],
+        num_rows="dynamic",
+        use_container_width=True,
+        key="fd_editor"
+    )
+    st.session_state["fd_data"] = edited_fd
+
+    # Calculate Totals
+    total_fd_val = edited_fd["Amount (₹)"].sum()
+    avg_fd_rate  = (edited_fd["Amount (₹)"] * edited_fd["Interest Rate (%)"]).sum() / total_fd_val if total_fd_val > 0 else 7.0
+    st.session_state["fd_value"] = total_fd_val
+    st.session_state["avg_fd_rate"] = avg_fd_rate / 100.0 # Store as decimal
+
+    c1, c2 = st.columns(2)
+    c1.metric("Total Fixed Deposits", f"₹{total_fd_val:,.2f}")
+    c2.metric("Weighted Avg Rate", f"{avg_fd_rate:.2f}%")
+
+    st.info("These balances are integrated into your 'My Portfolio' summary and optimized for your 'Forecast' projections.")
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # TAB: MY PORTFOLIO  (combined overview — stocks + MF + total)
 # ════════════════════════════════════════════════════════════════════════════
 with tab_overview:
-    st.header(" My Total Portfolio — Stocks + Mutual Funds")
-    st.caption("Combined view of your entire investment portfolio.")
+    st.header(" My Total Portfolio — Consolidated View")
+    st.caption("Real-time summary of Stocks, Mutual Funds, Gold, Real Estate, and Fixed Deposits.")
 
-    # Pull stock totals from session state (populated when Stock Portfolio tab runs)
+    # Pull totals from session state
     stock_invested = st.session_state.get("stock_invested", 0.0)
     stock_value    = st.session_state.get("stock_value",    0.0)
+    gold_v         = st.session_state.get("gold_value",     0.0)
+    re_v           = st.session_state.get("re_value",       0.0)
+    fd_v           = st.session_state.get("fd_value",       0.0)
 
     if stock_invested == 0.0 and stock_value == 0.0:
         st.info(
             " **Tip:** Open the **Stock Portfolio** tab first so stock prices are loaded, "
             "then return here to see your combined portfolio overview."
         )
-        # Still show what we can from MF alone
-        if mf_total_invested > 0:
-            st.markdown("#### Mutual Funds (loaded from file)")
-            mf_pnl     = mf_total_value - mf_total_invested
-            mf_pnl_pct = mf_pnl / mf_total_invested * 100 if mf_total_invested > 0 else 0
-            m1, m2, m3 = st.columns(3)
-            m1.metric("MF Invested", f"₹{mf_total_invested:,.2f}")
-            m2.metric("MF Value",    f"₹{mf_total_value:,.2f}")
-            m3.metric("MF P&L",      f"₹{mf_pnl:,.2f}", f"{mf_pnl_pct:+.2f}%")
     else:
         render_combined_overview(
             stock_invested=stock_invested,
             stock_value=stock_value,
             mf_invested=mf_total_invested,
             mf_value=mf_total_value,
+            gold_value=gold_v,
+            re_value=re_v,
+            fd_value=fd_v,
         )
 
         # ── Asset-class P&L trend (sparkline-style bar) ───────────────────
@@ -1372,7 +1496,8 @@ with tab_forecast:
         st.markdown("**Return Rates (p.a.)**")
         stock_return = st.number_input("Stocks",           0.0, 0.50, 0.14, 0.005, format="%.3f", key="fc_st_r")
         mf_return    = st.number_input("Mutual Funds",     0.0, 0.50, defaults["mf_r"],  0.005, format="%.3f", key="fc_mf_r")
-        fd_rate      = st.number_input("Fixed Deposits",   0.0, 0.30, defaults["fd_r"], 0.005, format="%.3f", key="fc_fd_r")
+        gold_return  = st.number_input("Gold",             0.0, 0.30, 0.08, 0.005, format="%.3f", key="fc_gold_r")
+        fd_rate      = st.number_input("Fixed Deposits",   0.0, 0.30, st.session_state.get("avg_fd_rate", defaults["fd_r"]), 0.005, format="%.3f", key="fc_fd_r")
         etf_return   = st.number_input("ETFs (Global)",    0.0, 0.40, defaults["etf_r"],0.005, format="%.3f", key="fc_etf_r")
 
     with col_b:
@@ -1400,8 +1525,9 @@ with tab_forecast:
     asset_rates = {
         "Direct Stocks":  (cur_st,  stock_return),
         "Mutual Funds":   (cur_mf,  mf_return),
-        "Fixed Deposits": (cur_fd,  fd_rate),
-        "Real Estate":    (cur_re,  re_appre),
+        "Gold":           (st.session_state.get("gold_value", 0.0), gold_return),
+        "Real Estate":    (st.session_state.get("re_value", 0.0),   re_appre),
+        "Fixed Deposits": (st.session_state.get("fd_value", 0.0),   fd_rate),
         "Other Assets":   (cur_os,  0.07),
     }
     total_cur    = sum(v for v, _ in asset_rates.values())
