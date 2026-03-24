@@ -1022,7 +1022,7 @@ def render_combined_overview(
 # ════════════════════════════════════════════════════════════════════════════
 
 st.title(" Nivetha's Portfolio Tracker")
-st.caption("Long-term investor edition — fundamental-first signal engine")
+st.caption("Created by Aravind- for long-term wealth creation")
 
 excel_path = r"holdings-UB7034.xlsx"
 
