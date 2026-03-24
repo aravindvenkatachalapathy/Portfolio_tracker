@@ -11,7 +11,7 @@ from mcp.client.stdio import stdio_client, StdioServerParameters
 from mcp.client.session import ClientSession
 import json
 
-os.environ["GOOGLE_API_KEY"] = "AIzaSyAWrsppAxu_7wukeHFhVvmg8C0GrHu0v1U"
+os.environ["GOOGLE_API_KEY"] = st.secrets.get("GOOGLE_API_KEY", "")
 
 st.set_page_config(layout="wide", page_title="Nivetha's Live Kite Tracker")
 

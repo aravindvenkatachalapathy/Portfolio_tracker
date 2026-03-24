@@ -10,7 +10,8 @@ import os
 from datetime import datetime, date
 
 # ── secrets ──────────────────────────────────────────────────────────────────
-os.environ.setdefault("GOOGLE_API_KEY", "AIzaSyAWrsppAxu_7wukeHFhVvmg8C0GrHu0v1U")
+# Use st.secrets or environmental variables for safety
+os.environ.setdefault("GOOGLE_API_KEY", st.secrets.get("GOOGLE_API_KEY", ""))
 
 st.set_page_config(layout="wide", page_title="Nivetha's Portfolio Tracker", page_icon="")
 
