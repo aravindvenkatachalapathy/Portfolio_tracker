@@ -1,0 +1,10 @@
+.streamlit/secrets.toml
+__pycache__/
+.venv/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
+# Note: Excel files are included by default since they are the local database, 
+# but be careful if sharing the repo!
+# holdings-UB7034.xlsx
