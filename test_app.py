@@ -8,6 +8,12 @@ import google.generativeai as genai
 import openai
 import os
 from datetime import datetime, date
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Import new modules for ML, backtest, and screener
+from ml_models import train_model, predict_stock, get_feature_importance_chart
+from backtest import run_backtest, plot_equity_curve
+from screener_data import NIFTY_200_SECTORS, ALL_SCREENER_TICKERS, TICKER_SECTOR_MAP
 
 # ── secrets ──────────────────────────────────────────────────────────────────
 # Use st.secrets or environmental variables for safety
@@ -1103,13 +1109,17 @@ if not mf_df.empty:
         })
 
 # ── TABS ─────────────────────────────────────────────────────────────────
-tab_overview, tab_stocks, tab_mf, tab_alt, tab_fd, tab_forecast = st.tabs([
+tab_sell, tab_overview, tab_stocks, tab_mf, tab_alt, tab_fd, tab_forecast, tab_ml, tab_backtest, tab_screener = st.tabs([
+    "🚨 Sell Candidates",
     "My Portfolio",
     "Stock Portfolio",
     "Mutual Funds",
     "Alt Assets",
     "Fixed Deposits",
     "Forecast",
+    "🤖 ML Predictions",
+    "📊 Backtesting",
+    "🔍 Stock Screener",
 ])
 
 
@@ -1272,6 +1282,115 @@ Format with clear markdown headers. Be direct and specific. No hype.
                 st.markdown(call_ai(prompt))
             except Exception as e:
                 st.error(f"AI failed: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB: SELL CANDIDATES (home / landing tab)
+# ════════════════════════════════════════════════════════════════════════════
+with tab_sell:
+    st.header("🚨 Sell Candidates")
+    st.caption(
+        "Ranks every holding by a composite weakness score and tells you when to pull the trigger. "
+        "Top 3 are highlighted as the strongest sell cases."
+    )
+
+    if not rows_for_table:
+        st.info("No holdings analysed yet. Open the Stock Portfolio tab once to populate.")
+    else:
+        sell_rows = []
+        for r in rows_for_table:
+            sym = r["Symbol"]
+            ana = analysis_store.get(sym)
+            if ana is None:
+                continue
+            close_s   = ana["close"]
+            cp        = ana["current_price"]
+            high_52w  = float(close_s.tail(252).max()) if len(close_s) else cp
+            dd_high   = (cp / high_52w - 1) * 100 if high_52w > 0 else 0.0
+            rsi_now   = float(ana["rsi_series"].iloc[-1]) if len(ana["rsi_series"]) else 50.0
+            macd_h    = float(ana["macd_hist"].iloc[-1]) if len(ana["macd_hist"]) else 0.0
+            score100  = float(r["Score /100"])
+            pnl_pct   = float(r["P&L (%)"])
+
+            loss_c    = min(max(-pnl_pct, 0), 100)
+            dd_c      = min(max(-dd_high, 0), 100)
+            weak_c    = max(100 - score100, 0)
+            sell_score = 0.45 * loss_c + 0.30 * dd_c + 0.25 * weak_c
+
+            if rsi_now >= 70:
+                timing = "📈 Sell now — overbought rally, take the exit"
+            elif rsi_now <= 30 and macd_h > 0:
+                timing = "⏳ Wait — oversold bounce starting; sell when RSI > 55"
+            elif rsi_now <= 30:
+                timing = "⏳ Wait for bounce — oversold; don't sell at the low"
+            elif macd_h > 0 and rsi_now < 60:
+                timing = "📈 Sell into next 5–10% rally (MACD turning up)"
+            elif macd_h < 0:
+                timing = "🔻 Sell on next green day — downtrend intact"
+            else:
+                timing = "🟡 Sell in tranches over 2–4 weeks"
+
+            sell_rows.append({
+                "Symbol":             sym,
+                "P&L (%)":            pnl_pct,
+                "Drawdown 52w (%)":   dd_high,
+                "Score /100":         score100,
+                "RSI(14)":            rsi_now,
+                "Sell Score":         sell_score,
+                "Right time to sell": timing,
+            })
+
+        if sell_rows:
+            sell_df = (
+                pd.DataFrame(sell_rows)
+                .sort_values("Sell Score", ascending=False)
+                .reset_index(drop=True)
+            )
+            top3 = sell_df.head(3)["Symbol"].tolist()
+
+            c1, c2, c3 = st.columns(3)
+            for col, sym in zip((c1, c2, c3), top3):
+                row = sell_df[sell_df["Symbol"] == sym].iloc[0]
+                col.markdown(
+                    f"""
+                    <div style='background:#4a1a1a; border:1px solid #ff4d4d; border-radius:10px; padding:14px;'>
+                        <div style='color:#ffd6d6; font-size:12px; letter-spacing:1px;'>SELL #{top3.index(sym)+1}</div>
+                        <div style='color:#fff; font-size:22px; font-weight:800;'>{sym}</div>
+                        <div style='color:#ffb3b3; margin-top:6px;'>P&amp;L: {row['P&L (%)']:+.1f}% &nbsp;·&nbsp; Score: {row['Sell Score']:.0f}</div>
+                        <div style='color:#fff; margin-top:6px; font-size:13px;'>{row['Right time to sell']}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("")
+
+            def _highlight_top3(row):
+                hit = row["Symbol"] in top3
+                style = "background-color: #4a1a1a; font-weight: 700; color: #ffd6d6;" if hit else ""
+                return [style] * len(row)
+
+            st.dataframe(
+                sell_df.style
+                    .apply(_highlight_top3, axis=1)
+                    .format({
+                        "P&L (%)":          "{:+.2f}%",
+                        "Drawdown 52w (%)": "{:+.2f}%",
+                        "Score /100":       "{:.0f}",
+                        "RSI(14)":          "{:.1f}",
+                        "Sell Score":       "{:.1f}",
+                    })
+                    .background_gradient(subset=["Sell Score"], cmap="Reds"),
+                use_container_width=True, height=480,
+            )
+
+            st.caption(
+                "Sell Score = 0.45·loss% + 0.30·drawdown from 52-week high + 0.25·(100 − fundamental score). "
+                "Timing column reads RSI(14) and MACD histogram on daily data — it answers *when* to exit, not *whether*. "
+                "ETFs, SGBs and liquid funds may appear here but shouldn't be exited on technicals; review those separately."
+            )
+        else:
+            st.info("No holdings available to rank.")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1740,3 +1859,256 @@ Tone: direct and honest, like a fiduciary advisor. No hype, no flattery.
                 st.markdown(call_ai(prompt))
             except Exception as e:
                 st.error(f"AI unavailable: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB: ML PREDICTIONS (XGBoost)
+# ════════════════════════════════════════════════════════════════════════════
+with tab_ml:
+    st.header("🤖 ML Stock Predictions (XGBoost)")
+    st.caption("Predicts if a stock will be up in N days based on technical features trained on historical data.")
+
+    col_ml_1, col_ml_2 = st.columns([3, 1])
+    with col_ml_1:
+        ml_ticker = st.selectbox("Select Stock", TOP_50, key="ml_ticker_select")
+    with col_ml_2:
+        ml_horizon = st.selectbox("Prediction Horizon (days)", [30, 60, 90], key="ml_horizon")
+
+    if st.button("Train / Load ML Model", key="ml_train_btn"):
+        with st.spinner("Training XGBoost model on historical data (may take 1-2 mins)..."):
+            try:
+                model_bundle = train_model(
+                    tickers=TOP_50,
+                    horizon=ml_horizon,
+                    fetch_fn=fetch_history
+                )
+
+                if model_bundle.get('error'):
+                    st.error(f"Model training failed: {model_bundle['error']}")
+                else:
+                    st.success(f"✅ Model ready! CV Accuracy: {model_bundle['cv_accuracy']:.1%} | Trained on {model_bundle['num_samples']} samples")
+
+                    # Fetch current stock data
+                    ml_hist = fetch_history(ml_ticker)
+                    prediction = predict_stock(ml_ticker, ml_hist, model_bundle)
+
+                    # Show prediction card
+                    st.divider()
+                    col_pred_a, col_pred_b, col_pred_c = st.columns(3)
+                    col_pred_a.metric("📈 Direction", prediction['direction'], f"{prediction['probability_up']:.1%} confidence")
+                    col_pred_b.metric("📊 Probability Up", f"{prediction['probability_up']:.1%}")
+                    col_pred_c.metric("⭐ Confidence Level", prediction['confidence_label'])
+
+                    st.divider()
+
+                    # Feature importances chart
+                    st.plotly_chart(get_feature_importance_chart(model_bundle), use_container_width=True)
+
+                    # Top 5 drivers
+                    st.subheader("🔑 Key Drivers for This Prediction")
+                    for i, (name, importance) in enumerate(prediction['top_features'], 1):
+                        st.write(f"{i}. **{name}**: {importance:.4f}")
+
+                    st.info(f"⏱️ Prediction horizon: {prediction['horizon_days']} days ahead")
+
+            except Exception as e:
+                st.error(f"ML training failed: {str(e)}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB: BACKTESTING
+# ════════════════════════════════════════════════════════════════════════════
+with tab_backtest:
+    st.header("📊 Technical Signal Backtesting")
+    st.caption("Replays historical buy/sell signals to show what returns would have been. Uses only technical indicators (RSI, MACD, Bollinger).")
+
+    bt_col1, bt_col2, bt_col3 = st.columns(3)
+    with bt_col1:
+        bt_ticker = st.selectbox("Stock to Backtest", TOP_50, key="bt_ticker_select")
+    with bt_col2:
+        bt_period = st.radio("Historical Period", ["1Y", "3Y", "5Y", "Max"], horizontal=True, index=1)
+    with bt_col3:
+        bt_capital = st.number_input("Simulated Capital (₹)", value=100000, step=10000, min_value=10000)
+
+    if st.button("Run Backtest", key="bt_run_btn"):
+        with st.spinner(f"Running backtest on {bt_ticker}..."):
+            try:
+                bt_hist = fetch_history(bt_ticker)
+                if bt_hist is None or len(bt_hist) < 100:
+                    st.error(f"Insufficient data for {bt_ticker}")
+                else:
+                    bt_results = run_backtest(bt_hist, bt_ticker, bt_capital, bt_period)
+
+                    # Metrics row
+                    st.divider()
+                    m = bt_results['metrics']
+                    metric_cols = st.columns(6)
+                    metric_cols[0].metric("Total Return", f"{m['total_return_pct']:+.1f}%")
+                    metric_cols[1].metric("CAGR", f"{m['cagr_pct']:+.1f}%")
+                    metric_cols[2].metric("Max Drawdown", f"{m['max_drawdown_pct']:.1f}%")
+                    metric_cols[3].metric("Sharpe Ratio", f"{m['sharpe_ratio']:.2f}")
+                    metric_cols[4].metric("Win Rate", f"{m['win_rate_pct']:.1f}%")
+                    metric_cols[5].metric("# Trades", m['num_trades'])
+
+                    # Benchmark comparison
+                    st.divider()
+                    st.info(f"📈 Buy & Hold Return: **{m['buy_hold_return_pct']:+.1f}%**  |  Strategy Return: **{m['total_return_pct']:+.1f}%**")
+
+                    # Equity curve chart
+                    st.plotly_chart(
+                        plot_equity_curve(bt_results['equity_curve'], bt_results['trades'], bt_ticker, bt_hist),
+                        use_container_width=True
+                    )
+
+                    # Trade log
+                    with st.expander("📋 Trade Log"):
+                        if bt_results['trades']:
+                            trade_df = pd.DataFrame(bt_results['trades'])
+                            st.dataframe(trade_df, use_container_width=True, height=400)
+                        else:
+                            st.info("No trades executed in this period.")
+
+            except Exception as e:
+                st.error(f"Backtest failed: {str(e)}")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB: STOCK SCREENER (NSE 200+)
+# ════════════════════════════════════════════════════════════════════════════
+with tab_screener:
+    st.header("🔍 NSE Stock Screener (~200 stocks)")
+    st.caption("Scan and filter all major Indian stocks by fundamental quality, valuation, and sector.")
+
+    # Filter controls
+    st.subheader("Filter Settings")
+    screen_col1, screen_col2, screen_col3 = st.columns(3)
+
+    with screen_col1:
+        min_score = st.slider("Min Long-Term Score", 0, 80, 40, key="screener_min_score")
+        selected_sectors = st.multiselect(
+            "Select Sectors",
+            list(NIFTY_200_SECTORS.keys()),
+            default=list(NIFTY_200_SECTORS.keys()),
+            key="screener_sectors"
+        )
+
+    with screen_col2:
+        pe_range = st.slider("P/E Range", 0, 200, (0, 60), key="screener_pe_range")
+        min_roe = st.slider("Min ROE (%)", 0, 50, 10, key="screener_min_roe")
+
+    with screen_col3:
+        min_rev_growth = st.slider("Min Revenue Growth (%)", -20, 100, 0, key="screener_min_revgrowth")
+        sort_by = st.selectbox("Sort Results By", ["score", "pe", "roe", "rev_growth"], key="screener_sort")
+
+    if st.button("🔎 Scan Stocks", key="screener_scan_btn"):
+        # Filter universe by sector
+        universe = [
+            t for t in ALL_SCREENER_TICKERS
+            if TICKER_SECTOR_MAP.get(t, "") in selected_sectors
+        ]
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results = []
+
+        def scan_ticker(ticker):
+            """Scan a single ticker for screening."""
+            try:
+                hist = fetch_history(ticker)
+                info = fetch_info(ticker)
+                if hist is None or info is None or hist.empty:
+                    return None
+
+                scores = long_term_score(info)
+                return {
+                    'Ticker': ticker.replace('.NS', ''),
+                    'Sector': TICKER_SECTOR_MAP.get(ticker, 'Unknown'),
+                    'Score': scores['quality_score'] + scores['valuation_score'],
+                    'Quality': scores['quality_score'],
+                    'Valuation': scores['valuation_score'],
+                    'PE': scores.get('pe'),
+                    'ROE %': scores.get('roe', 0) * 100 if scores.get('roe') else 0,
+                    'Rev Growth %': scores.get('rev_growth', 0) * 100 if scores.get('rev_growth') else 0,
+                    'Label': scores['label'],
+                }
+            except Exception as e:
+                return None
+
+        # Parallel scanning
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(scan_ticker, t): t for t in universe}
+            completed = 0
+
+            for future in as_completed(futures):
+                completed += 1
+                progress_bar.progress(min(completed / len(universe), 1.0))
+                status_text.text(f"Scanning {completed}/{len(universe)} stocks...")
+
+                result = future.result()
+                if result:
+                    results.append(result)
+
+        progress_bar.empty()
+        status_text.empty()
+
+        # Apply filters
+        if results:
+            df_screener = pd.DataFrame(results)
+
+            # Filter by criteria
+            df_filtered = df_screener[
+                (df_screener['Score'] >= min_score) &
+                (df_screener['PE'].fillna(0) >= pe_range[0]) &
+                (df_screener['PE'].fillna(999) <= pe_range[1]) &
+                (df_screener['ROE %'] >= min_roe) &
+                (df_screener['Rev Growth %'] >= min_rev_growth)
+            ].copy()
+
+            # Sort
+            sort_col = 'Score' if sort_by == 'score' else ('PE' if sort_by == 'pe' else ('ROE %' if sort_by == 'roe' else 'Rev Growth %'))
+            ascending = (sort_by == 'pe')  # PE: lower is better
+            df_filtered = df_filtered.sort_values(sort_col, ascending=ascending)
+
+            st.success(f"✅ Found **{len(df_filtered)} stocks** matching criteria")
+            st.divider()
+
+            # Display results table
+            st.subheader("Results")
+            st.dataframe(
+                df_filtered.style.format({
+                    'Score': '{:.0f}',
+                    'Quality': '{:.0f}',
+                    'Valuation': '{:.0f}',
+                    'PE': '{:.1f}',
+                    'ROE %': '{:.1f}',
+                    'Rev Growth %': '{:.1f}',
+                }).background_gradient(subset=['Score'], cmap='RdYlGn'),
+                use_container_width=True,
+                height=500,
+            )
+
+            # Stock detail drill-down
+            if not df_filtered.empty:
+                st.divider()
+                st.subheader("📊 Stock Deep-Dive")
+
+                detail_ticker = st.selectbox("View detailed analysis for:", df_filtered['Ticker'].tolist(), key="screener_detail_ticker")
+
+                if detail_ticker:
+                    detail_ticker_full = detail_ticker + ".NS"
+                    with st.spinner(f"Loading {detail_ticker}..."):
+                        try:
+                            detail_hist = fetch_history(detail_ticker_full)
+                            detail_info = fetch_info(detail_ticker_full)
+                            detail_fund = long_term_score(detail_info)
+                            detail_ana = analyze_stock(detail_hist, detail_ticker, 0.0, detail_fund)
+
+                            if detail_ana:
+                                render_stock_card(detail_ana, fund=detail_fund, ai_enabled=True)
+                            else:
+                                st.warning(f"Could not analyze {detail_ticker}")
+                        except Exception as e:
+                            st.error(f"Error loading {detail_ticker}: {str(e)}")
+
+        else:
+            st.warning("⚠️ No stocks found matching your criteria. Try relaxing the filters.")
