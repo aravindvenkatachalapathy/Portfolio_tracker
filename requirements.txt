@@ -7,3 +7,6 @@ google-generativeai
 openai
 openpyxl
 matplotlib
+xgboost
+scikit-learn
+joblib
